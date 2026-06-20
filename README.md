@@ -51,8 +51,9 @@ Two tracks, deliberately separated:
 ## Results
 
 Headline run: 1,000,000 keys, `-count=10`, GOMAXPROCS swept 1→8, on a 20-core
-i7-14700K. Full data in [results/](results/) (`summary.txt`, `by-impl.txt`);
-regenerate the figures with `go run ./cmd/charts`.
+i7-14700K, **pinned to one thread per physical P-core** (the chip is hybrid; see
+[Pinning](#pinning-to-p-cores)). Full data in [results/](results/)
+(`summary.txt`, `by-impl.txt`); regenerate the figures with `go run ./cmd/charts`.
 
 ### Throughput vs cores, by read/write mix (uniform)
 
@@ -67,9 +68,10 @@ collapses to ≈0 throughput once writes appear (off-scale — see the table).
 ![Scaling efficiency, read-only](charts/scaling_efficiency_r100_uniform.png)
 
 Speedup vs each design's own 1-core baseline. `mutex` is *below* 1× (negative
-scaling); `rwmutex` plateaus ~1.9× (the reader-counter wall); `sharded` hits
-6.4×; `cow`/`syncmap` hug the ideal line — though `syncmap`'s near-linear slope
-flatters a poor 1-core baseline (great scaling, still mediocre absolute).
+scaling); `rwmutex` plateaus ~2× (the reader-counter wall); `sharded` hits 6.9×;
+`cow`/`syncmap` track or slightly exceed the ideal 8× line — though `syncmap`'s
+near-linear slope flatters a poor 1-core baseline (great scaling, still mediocre
+absolute).
 
 ### Effect of skew (Zipfian, s=1.1)
 
@@ -77,9 +79,9 @@ flatters a poor 1-core baseline (great scaling, still mediocre absolute).
 
 ![Skew speedup at 8 cores](charts/skew_speedup_8cores.png)
 
-Skew is not uniformly "worse": reads get *faster* (hot keys stay in CPU cache),
-but contended writes get *slower* for `sharded` and `cow` (hot keys concentrate
-on a few shards / force more whole-map copies).
+Skew is not uniformly "worse": reads get *faster* almost everywhere (hot keys
+stay in CPU cache), but `sharded`'s balanced mix gets *slower* (0.82×) — hot keys
+collide on a few shards while the rest sit idle.
 
 ### Latency at 8 cores (ns/op, lower is better)
 
@@ -87,23 +89,23 @@ Uniform distribution:
 
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
-| read-only (r100) | 166 | 57 | 29 | 20 | **11** |
-| read-heavy (r90) | 169 | 247 | 36 | **21** | 11.3 ms |
-| balanced (r50) | 179 | 241 | 55 | **23** | 40.3 ms |
-| write-heavy (r10) | 187 | 207 | 71 | **24** | 80.6 ms |
+| read-only (r100) | 168 | 53 | 30 | 21 | **11.5** |
+| read-heavy (r90) | 168 | 259 | 37 | **22** | 12.0 ms |
+| balanced (r50) | 190 | 282 | 57 | **24** | 46.5 ms |
+| write-heavy (r10) | 208 | 222 | 73 | **25** | 82.5 ms |
 
 Zipfian distribution (s=1.1):
 
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
-| read-only (r100) | 106 | 61 | 15 | 19 | **7** |
-| read-heavy (r90) | 116 | 208 | 23 | **22** | 8.9 ms |
-| balanced (r50) | 132 | 183 | 44 | **28** | 45.2 ms |
-| write-heavy (r10) | 137 | 143 | 66 | **30** | 83.0 ms |
+| read-only (r100) | 106 | 49 | 16 | 17 | **7** |
+| read-heavy (r90) | 112 | 225 | 24 | **24** | 9.0 ms |
+| balanced (r50) | 126 | 183 | 46 | **29** | 45.1 ms |
+| write-heavy (r10) | 131 | 142 | 68 | **32** | 84.0 ms |
 
 `cow` write cells are in milliseconds because each `Set` copies the whole
-million-entry map. Overall geomean vs the `mutex` baseline: `sharded` −60 %,
-`syncmap` −19 %, `rwmutex` +6 %, `cow` off the chart (writes dominate).
+million-entry map. Overall geomean vs the `mutex` baseline: `sharded` −58 %,
+`syncmap` −15 %, `rwmutex` +6 %, `cow` off the chart (writes dominate).
 
 ## Running
 
@@ -129,6 +131,34 @@ go test -bench=BenchmarkSequential -benchmem
 # Track B HTTP server:
 go run ./cmd/server -impl=sharded -addr=:8080
 ```
+
+### Pinning to P-cores
+
+The published numbers were measured on a hybrid CPU (8 performance + 12
+efficiency cores). Unpinned, the OS scheduler can place benchmark goroutines on
+E-cores or hyperthread siblings as GOMAXPROCS rises and migrate them mid-run,
+which confounds the scaling curves. To avoid that, the benchmark pins itself to
+a processor-affinity mask given by `INMEMCACHE_AFFINITY` (a `TestMain` in
+[affinity_windows_test.go](affinity_windows_test.go) calls
+`SetProcessAffinityMask` before any benchmark runs).
+
+Find the right mask for your machine with [cmd/cpuinfo](cmd/cpuinfo), which reads
+the kernel's per-logical-processor `EfficiencyClass`:
+
+```sh
+go run ./cmd/cpuinfo
+# -> e.g. "AFFINITY mask (1/P-core): 0x5555" on an i7-14700K
+```
+
+Then pass it to any run (it propagates to each `go test` child):
+
+```sh
+INMEMCACHE_AFFINITY=0x5555 KEYS=1000000 COUNT=10 CPU=1,2,4,8 bash sweep.sh
+```
+
+The process logs `[affinity] requested=0x5555 set_ok=true effective=0x5555` to
+stderr so you can confirm the pin took. Pinning is Windows-only and a no-op when
+the env var is unset (so the benchmark runs unmodified on any platform).
 
 ### Statistical summary with benchstat
 
