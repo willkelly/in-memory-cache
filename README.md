@@ -92,22 +92,23 @@ Uniform distribution:
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
 | read-only (r100) | 168 | 53 | 30 | 21 | **11.5** |
-| read-heavy (r90) | 168 | 259 | 37 | **22** | 12.0 ms |
-| balanced (r50) | 190 | 282 | 57 | **24** | 46.5 ms |
-| write-heavy (r10) | 208 | 222 | 73 | **25** | 82.5 ms |
+| read-heavy (r90) | 168 | 259 | 37 | **22** | 12,000,000 |
+| balanced (r50) | 190 | 282 | 57 | **24** | 46,500,000 |
+| write-heavy (r10) | 208 | 222 | 73 | **25** | 82,500,000 |
 
 Zipfian distribution (s=1.1):
 
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
 | read-only (r100) | 106 | 49 | 16 | 17 | **7** |
-| read-heavy (r90) | 112 | 225 | 24 | **24** | 9.0 ms |
-| balanced (r50) | 126 | 183 | 46 | **29** | 45.1 ms |
-| write-heavy (r10) | 131 | 142 | 68 | **32** | 84.0 ms |
+| read-heavy (r90) | 112 | 225 | 24 | **24** | 9,040,000 |
+| balanced (r50) | 126 | 183 | 46 | **29** | 45,100,000 |
+| write-heavy (r10) | 131 | 142 | 68 | **32** | 84,000,000 |
 
-`cow` write cells are in milliseconds because each `Set` copies the whole
-million-entry map. Overall geomean vs the `mutex` baseline: `sharded` −58 %,
-`syncmap` −15 %, `rwmutex` +6 %, `cow` off the chart (writes dominate).
+The whole column is ns: `cow`'s eight-figure write cells (≈82 ms per `Set`) are
+real — it copies the entire million-entry map on every write. Overall geomean vs
+the `mutex` baseline: `sharded` −58 %, `syncmap` −15 %, `rwmutex` +6 %, `cow` off
+the chart (writes dominate).
 
 ## Running
 

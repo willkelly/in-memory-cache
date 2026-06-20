@@ -111,21 +111,23 @@ Uniform:
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
 | read-only | 168 | 53 | 30 | 21 | **11.5** |
-| read-heavy | 168 | 259 | 37 | **22** | 12.0 ms |
-| balanced | 190 | 282 | 57 | **24** | 46.5 ms |
-| write-heavy | 208 | 222 | 73 | **25** | 82.5 ms |
+| read-heavy | 168 | 259 | 37 | **22** | 12,000,000 |
+| balanced | 190 | 282 | 57 | **24** | 46,500,000 |
+| write-heavy | 208 | 222 | 73 | **25** | 82,500,000 |
 
 Zipfian (s=1.1):
 
 | mix | mutex | rwmutex | syncmap | sharded | cow |
 |---|--:|--:|--:|--:|--:|
 | read-only | 106 | 49 | 16 | 17 | **7** |
-| read-heavy | 112 | 225 | 24 | **24** | 9.0 ms |
-| balanced | 126 | 183 | 46 | **29** | 45.1 ms |
-| write-heavy | 131 | 142 | 68 | **32** | 84.0 ms |
+| read-heavy | 112 | 225 | 24 | **24** | 9,040,000 |
+| balanced | 126 | 183 | 46 | **29** | 45,100,000 |
+| write-heavy | 131 | 142 | 68 | **32** | 84,000,000 |
 
-Those `cow` write cells are in *milliseconds*: copying a million-entry map per
-write is ~10⁶× slower than the alternatives. It's the price of lock-free reads.
+Those eight-figure `cow` write cells are real, and the whole column is ns: a
+write copies the entire million-entry map, ~10⁶× slower than the alternatives.
+`82,500,000` ns is **82 milliseconds** — per `Set`. That's the price of
+lock-free reads.
 
 ## The winner, in a few lines
 
