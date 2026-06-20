@@ -17,7 +17,7 @@ the cost of *synchronization*.
 | `rwmutex` | [rwmutex.go](rwmutex.go)   | `sync.RWMutex` | Parallel reads; exclusive writes. |
 | `syncmap` | [syncmap.go](syncmap.go)   | `sync.Map` | The stdlib's own answer; wins only for read-mostly / disjoint-key patterns. |
 | `sharded` | [sharded.go](sharded.go)   | Lock striping (256 shards) | Canonical high-throughput design. Weak under skew. |
-| `cow`     | [cow.go](cow.go)           | Copy-on-write via `atomic.Pointer` | Lock-free reads; O(n) writes. The *race-free* version of the "two maps" idea. |
+| `cow`     | [cow.go](cow.go)           | Copy-on-write via `atomic.Pointer` | Lock-free reads; O(n) writes. |
 
 ## Measurement design
 
