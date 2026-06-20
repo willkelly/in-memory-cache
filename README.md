@@ -81,7 +81,9 @@ absolute).
 
 Skew is not uniformly "worse": reads get *faster* almost everywhere (hot keys
 stay in CPU cache), but `sharded`'s balanced mix gets *slower* (0.82×) — hot keys
-collide on a few shards while the rest sit idle.
+collide on a few shards while the rest sit idle. `cow` is the control: its
+balanced mix is flat (1.03×), because it copies the whole map on every write
+regardless of key, so the distribution can't change its write cost.
 
 ### Latency at 8 cores (ns/op, lower is better)
 

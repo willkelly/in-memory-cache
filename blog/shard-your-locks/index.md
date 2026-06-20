@@ -95,8 +95,14 @@ Above 1× means *faster* under skew. **Reads get faster almost everywhere** — 
 hot keys stay in CPU cache (`mutex` reads speed up 1.6×, `syncmap` 1.9×). The
 striking exception is **`sharded`'s balanced mix at 0.82× — skew makes it
 *slower***: hot keys collide on a few shards, so those locks contend while the
-rest sit idle. Skew helps locality and hurts lock striping; which wins depends
-on your design and your write ratio.
+rest sit idle.
+
+`cow` is the control case: its balanced-mix bar sits at 1.03×, essentially flat.
+That's the tell-tale of a design whose write cost is *distribution-independent* —
+it copies the whole map on every `Set` regardless of which key changed, so the
+key distribution can't touch it. Skew moves a number only where the distribution
+changes *where* work lands (cache lines, shards); it leaves `cow`'s uniform copy
+cost alone. Which way it cuts depends on your design and write ratio.
 
 ### The numbers (8 cores, ns/op, lower is better)
 
