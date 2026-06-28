@@ -27,21 +27,17 @@ import "github.com/puzpuzpuz/xsync/v4"
 // for hash code calculation.
 
 type SyncXMap struct {
-	m *xsync.MapOf[string, string]
+	m *xsync.Map[string, string]
 }
 
 func NewSyncXMap() *SyncXMap {
 	return &SyncXMap{
-		m: xsync.NewMapOf[string, string](),
+		m: xsync.NewMap[string, string](),
 	}
 }
 
 func (c *SyncXMap) Get(key string) (string, bool) {
-	v, ok := c.m.Load(key)
-	if !ok {
-		return "", false
-	}
-	return v, true
+	return c.m.Load(key)
 }
 
 func (c *SyncXMap) Set(key, value string) {
@@ -53,10 +49,5 @@ func (c *SyncXMap) Delete(key string) {
 }
 
 func (c *SyncXMap) Len() int {
-	n := 0
-	c.m.Range(func(_, _ string) bool {
-		n++
-		return true
-	})
-	return n
+	return c.m.Size()
 }
