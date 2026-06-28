@@ -300,6 +300,89 @@ func shardCountChart() {
 	writeFile("shard_count_8cores.svg", b.String())
 }
 
+// headToHeadChart: the post-2 chart — throughput vs cores (uniform), read-only
+// and write-heavy panels, comparing the hand-rolled sharded map against the
+// libraries (xsync, otter) with sync.Map and cow for context. Pinned i7 data.
+func headToHeadChart() {
+	const cw, ch = 760, 400
+	type ser struct {
+		name, color, dash string
+		tput              [4]float64 // Mops/s at cores 1,2,4,8
+	}
+	ro := []ser{
+		{"sync.Map", "#BA7517", "2,3", [4]float64{3.8, 7.8, 16.2, 31.8}},
+		{"otter", "#D4537E", "6,4", [4]float64{3.6, 7.2, 15.2, 31.3}},
+		{"sharded", "#1D9E75", "", [4]float64{6.7, 13.4, 25.8, 46.1}},
+		{"xsync", "#534AB7", "", [4]float64{7.3, 15.3, 32.2, 64.9}},
+		{"cow", "#D85A30", "8,4,2,4", [4]float64{9.7, 20.6, 41.8, 83.3}},
+	}
+	wh := []ser{
+		{"sync.Map", "#BA7517", "2,3", [4]float64{1.4, 3.0, 7.0, 13.0}},
+		{"otter", "#D4537E", "6,4", [4]float64{1.5, 2.8, 2.9, 2.9}},
+		{"sharded", "#1D9E75", "", [4]float64{6.2, 11.9, 22.5, 39.1}},
+		{"xsync", "#534AB7", "", [4]float64{3.5, 7.2, 14.2, 28.2}},
+		{"cow", "#D85A30", "8,4,2,4", [4]float64{0, 0, 0, 0}},
+	}
+	ymax := 90.0
+	var b strings.Builder
+	svgHeader(&b, cw, ch, "Hand-rolled vs the libraries",
+		"Throughput in millions of ops/sec versus cores, uniform keys, pinned i7; read-only and write-heavy panels comparing sharded, xsync, otter, sync.Map and copy-on-write.")
+	f(&b, `<text x="20" y="24" font-size="15" font-weight="500" fill="%s">hand-rolled vs the libraries &#8212; throughput vs cores (uniform)</text>`, txt)
+	legX := 20.0
+	for _, s := range []ser{ro[3], ro[2], ro[0], ro[1], ro[4]} { // xsync, sharded, sync.Map, otter, cow
+		dash := ""
+		if s.dash != "" {
+			dash = fmt.Sprintf(` stroke-dasharray="%s"`, s.dash)
+		}
+		f(&b, `<line x1="%.1f" y1="40" x2="%.1f" y2="40" stroke="%s" stroke-width="3"%s/>`, legX, legX+22, s.color, dash)
+		f(&b, `<text x="%.1f" y="44" font-size="12" fill="%s">%s</text>`, legX+27, txt, s.name)
+		legX += 27 + float64(len(s.name))*7.2 + 18
+	}
+
+	panel := func(px, py, pw, ph float64, title string, series []ser) {
+		const ml, mr, mt, mb = 46, 14, 24, 32
+		plotW, plotH := pw-ml-mr, ph-mt-mb
+		x0, y0 := px+ml, py+mt
+		sx := func(i int) float64 { return x0 + float64(i)*plotW/3 }
+		sy := func(v float64) float64 { return y0 + plotH*(1-v/ymax) }
+		f(&b, `<text x="%.1f" y="%.1f" font-size="13" font-weight="500" fill="%s">%s</text>`, px+ml, py+14, txt, title)
+		for k := 0; k <= 3; k++ {
+			vv := ymax * float64(k) / 3
+			yy := sy(vv)
+			f(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>`, x0, yy, x0+plotW, yy, gridc)
+			f(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="end">%.0f</text>`, x0-5, yy+3, muted, vv)
+		}
+		cores := []string{"1", "2", "4", "8"}
+		for i := range cores {
+			f(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="middle">%s</text>`, sx(i), y0+plotH+15, muted, cores[i])
+		}
+		f(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="middle">cores</text>`, x0+plotW/2, y0+plotH+28, muted)
+		f(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="middle" transform="rotate(-90 %.1f %.1f)">Mops/s</text>`, px+11, y0+plotH/2, muted, px+11, y0+plotH/2)
+		for _, s := range series {
+			var pts strings.Builder
+			for i := 0; i < 4; i++ {
+				pts.WriteString(fmt.Sprintf("%.1f,%.1f ", sx(i), sy(s.tput[i])))
+			}
+			dash, lw := "", 2.0
+			if s.dash != "" {
+				dash = fmt.Sprintf(` stroke-dasharray="%s"`, s.dash)
+			}
+			if s.name == "sharded" || s.name == "xsync" {
+				lw = 3
+			}
+			f(&b, `<polyline points="%s" fill="none" stroke="%s" stroke-width="%.1f"%s/>`, strings.TrimSpace(pts.String()), s.color, lw, dash)
+			for i := 0; i < 4; i++ {
+				f(&b, `<circle cx="%.1f" cy="%.1f" r="2.6" fill="%s"/>`, sx(i), sy(s.tput[i]), s.color)
+			}
+		}
+	}
+	pw := (cw - 30) / 2.0
+	panel(10, 54, pw, ch-64, "read-only", ro)
+	panel(20+pw, 54, pw, ch-64, "write-heavy", wh)
+	b.WriteString("</svg>")
+	writeFile("headtohead_uniform.svg", b.String())
+}
+
 func main() {
 	if err := os.MkdirAll("charts", 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -310,4 +393,5 @@ func main() {
 	efficiencyChart()
 	skewChart()
 	shardCountChart()
+	headToHeadChart()
 }
