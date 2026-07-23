@@ -28,8 +28,8 @@ RAW="$OUT/bench.txt"
 
 common=(-benchmem -count="$COUNT" -cpu="$CPU" -keys="$KEYS" -keylen="$KEYLEN" -run '^$')
 
-echo "### phase A: fast impls (mutex|rwmutex|syncmap|sharded,syncXmap,otter), -benchtime=$BT"
-"$GO" test -bench 'BenchmarkCache/impl=(mutex|rwmutex|syncmap|sharded|syncXmap|otter)' \
+echo "### phase A: fast impls (mutex|rwmutex|syncmap|sharded,syncXmap,otter,hamt,hamt256,ctrie), -benchtime=$BT"
+"$GO" test -bench 'BenchmarkCache/impl=(mutex|rwmutex|syncmap|sharded|syncXmap|otter|hamt|hamt256|ctrie)' \
   "${common[@]}" -benchtime="$BT" | tee -a "$RAW"
 
 # Anchor mix with $ -- "r10" is a substring of "r100".
@@ -40,6 +40,18 @@ echo "### phase B: cow reads (mix=r100), -benchtime=$BT"
 echo "### phase C: cow writes (mix=r10|r50|r90), -benchtime=$COWBT"
 "$GO" test -bench 'BenchmarkCache/impl=cow/dist=(uniform|zipf)/mix=(r10|r50|r90)$' \
   "${common[@]}" -benchtime="$COWBT" | grep -E '^Benchmark' | tee -a "$RAW"
+
+# The placement and value-size phases are contention/GC stories, so they run
+# at a single high core count rather than the whole -cpu sweep.
+ADVCPU="${ADVCPU:-8}"
+
+echo "### phase D: adversarial key placement (BenchmarkAdversarial), -cpu=$ADVCPU"
+"$GO" test -bench 'BenchmarkAdversarial' -benchmem -count="$COUNT" -cpu="$ADVCPU" \
+  -keys="$KEYS" -keylen="$KEYLEN" -run '^$' -benchtime="$BT" | grep -E '^Benchmark' | tee -a "$RAW"
+
+echo "### phase E: value-size regime (BenchmarkValueSize), -cpu=$ADVCPU"
+"$GO" test -bench 'BenchmarkValueSize' -benchmem -count="$COUNT" -cpu="$ADVCPU" \
+  -keys="$KEYS" -keylen="$KEYLEN" -run '^$' -benchtime="$BT" | grep -E '^Benchmark' | tee -a "$RAW"
 
 echo "=== summary (mean +/- CV) -> $OUT/summary.txt ==="
 "$BENCHSTAT" "$RAW" | tee "$OUT/summary.txt"

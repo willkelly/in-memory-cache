@@ -49,7 +49,11 @@ var Concurrent = []Impl{
 	{"syncXmap", func() Cache { return NewSyncXMap() }},
 	{"otter", func() Cache { return NewOtter() }},
 	{"sharded", func() Cache { return NewSharded() }},
+	{"actor", func() Cache { return NewActor() }},
 	{"cow", func() Cache { return NewCOW() }},
+	{"hamt", func() Cache { return NewHAMT() }},
+	{"hamt256", func() Cache { return NewShardedHAMT() }},
+	{"ctrie", func() Cache { return NewCtrie() }},
 }
 
 // All includes the naive (unsynchronized) implementation in addition to the
