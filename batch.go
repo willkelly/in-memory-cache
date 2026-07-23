@@ -38,6 +38,13 @@ type ParallelBatchGetter interface {
 	GetBatchParallel(keys []string) []BatchResult
 }
 
+// lowBitsShard is the routing shared by sharded and actor: the hash's low
+// bits. hamt256 routes differently (Fibonacci mixing), which is why
+// groupByShard takes the router as a parameter.
+func lowBitsShard(k string) uint64 {
+	return fnv1a(k) & (shardCount - 1)
+}
+
 // groupByShard partitions the *positions* of keys by owning shard with a
 // two-pass counting sort: shard s owns idxs[starts[s]:starts[s+1]], where
 // idxs is a permutation of [0, len(keys)). The keys themselves are never
@@ -45,12 +52,13 @@ type ParallelBatchGetter interface {
 // the coalescing step: however many times a hot key repeats, all of its
 // positions land in one shard's contiguous range and ride in one message.
 //
+// route maps a key to its shard and must return values < shardCount;
 // shardOf is a byte, which requires shardCount <= 256.
-func groupByShard(keys []string) (idxs []int, starts *[shardCount + 1]int) {
+func groupByShard(keys []string, route func(string) uint64) (idxs []int, starts *[shardCount + 1]int) {
 	shardOf := make([]uint8, len(keys))
 	starts = new([shardCount + 1]int)
 	for i, k := range keys {
-		s := int(fnv1a(k) & (shardCount - 1))
+		s := int(route(k))
 		shardOf[i] = uint8(s)
 		starts[s+1]++ // s must be int here: uint8 s+1 wraps 255 -> 0
 	}

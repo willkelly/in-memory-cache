@@ -423,6 +423,40 @@ So the mutex design *can* match the actor's batch speed — the point is what
 it took: forty lines of bespoke fork/join concurrency versus a sequential
 method on an existing protocol.
 
+The persistent designs answer the same question a third way
+([batch_persistent.go](batch_persistent.go)), and the numbers say
+something none of the columns above could: batching only pays where the
+design has a per-call cost to amortize — or a snapshot to share. Measured
+(32-core machine, `-keys=1000000`, uniform, 8 cores, ns/key at size
+4,096):
+
+| | loop | batch | what batch amortizes |
+|---|--:|--:|---|
+| sharded | 142 | 118 | 256 lock acquisitions — wins |
+| cow | 92 | 88 | one map-pointer load — nothing to win |
+| hamt | 232 | 180 | one root load + per-Get overhead — modest win |
+| hamt256 | 210 | **313** | grouping costs MORE than 4,096 root loads — loses |
+| ctrie | 256 | 263 | nothing — parity, as predicted |
+
+`hamt256`'s batch is deliberately kept as the honest negative result: it
+runs the same counting-sort grouping as `sharded`'s (with its own router
+— using `sharded`'s low-bits routing here would silently consult the
+wrong shards), but where `sharded` recoups the grouping by taking 256
+locks instead of 4,096, `hamt256` recoups only one 1-ns atomic load per
+key. The grouping is pure overhead unless you want what it actually
+buys: per-shard consistency.
+
+Which is the real story: for `cow` and `hamt`, `GetBatch` is not a
+performance feature at all but a *semantic* one — every answer comes from
+ONE atomic snapshot, a multi-key consistent read that no lock-striped
+design can offer at any price (`sharded`'s batch reads shard 3's keys,
+then, while writers keep writing, shard 7's). TestGetBatchSnapshot makes
+it concrete: a writer bumps k1 then k2 forever, so any true snapshot must
+see version(k1) ≥ version(k2); the snapshot batches never violate it,
+while a per-shard batch (or a plain Get loop) can. That is `hamt`'s niche
+stated one more way: the only fast structure here whose multi-key reads
+are transactions.
+
 > **Measurement note: hold the working set constant.** The benchmark cycles
 > prebuilt batches, so its memory working set is (batch count) × (batch
 > size) distinct keys. An earlier version fixed the *count* at 32, and

@@ -53,6 +53,10 @@ echo "### phase E: value-size regime (BenchmarkValueSize), -cpu=$ADVCPU"
 "$GO" test -bench 'BenchmarkValueSize' -benchmem -count="$COUNT" -cpu="$ADVCPU" \
   -keys="$KEYS" -keylen="$KEYLEN" -run '^$' -benchtime="$BT" | grep -E '^Benchmark' | tee -a "$RAW"
 
+echo "### phase F: batched gets (BenchmarkGetBatch), -cpu=$ADVCPU"
+"$GO" test -bench 'BenchmarkGetBatch' -benchmem -count="$COUNT" -cpu="$ADVCPU" \
+  -keys="$KEYS" -keylen="$KEYLEN" -run '^$' -benchtime="$BT" | grep -E '^Benchmark' | tee -a "$RAW"
+
 echo "=== summary (mean +/- CV) -> $OUT/summary.txt ==="
 "$BENCHSTAT" "$RAW" | tee "$OUT/summary.txt"
 

@@ -23,7 +23,7 @@ func (c *Sharded) GetBatch(keys []string) []BatchResult {
 	if len(keys) == 0 {
 		return out
 	}
-	idxs, starts := groupByShard(keys)
+	idxs, starts := groupByShard(keys, lowBitsShard)
 	for s := 0; s < shardCount; s++ {
 		part := idxs[starts[s]:starts[s+1]]
 		if len(part) == 0 {
@@ -54,7 +54,7 @@ func (c *Sharded) GetBatchParallel(keys []string) []BatchResult {
 	if len(keys) == 0 {
 		return out
 	}
-	idxs, starts := groupByShard(keys)
+	idxs, starts := groupByShard(keys, lowBitsShard)
 	workers := min(runtime.GOMAXPROCS(0), shardCount)
 	var cursor atomic.Int32
 	var wg sync.WaitGroup

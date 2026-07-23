@@ -131,6 +131,57 @@ func TestGetBatchConcurrent(t *testing.T) {
 	}
 }
 
+// TestGetBatchSnapshot pins the property that separates the snapshot
+// designs' batches from everyone else's: every answer in one batch comes
+// from ONE point-in-time state. A writer bumps k1 and then k2, in that
+// order, forever; any true snapshot therefore satisfies
+// version(k1) >= version(k2). A per-shard batch (or a plain Get loop) can
+// read k1 early and k2 after later writes, observing the impossible
+// version(k2) > version(k1).
+func TestGetBatchSnapshot(t *testing.T) {
+	for _, name := range []string{"cow", "hamt"} {
+		t.Run(name, func(t *testing.T) {
+			c, err := New(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bg := c.(BatchGetter)
+			c.Set("k1", "0")
+			c.Set("k2", "0")
+
+			stop := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 1; ; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					v := strconv.Itoa(i)
+					c.Set("k1", v)
+					c.Set("k2", v)
+				}
+			}()
+
+			query := []string{"k1", "k2"}
+			for j := 0; j < 20_000; j++ {
+				res := bg.GetBatch(query)
+				v1, _ := strconv.Atoi(res[0].Value)
+				v2, _ := strconv.Atoi(res[1].Value)
+				if v2 > v1 {
+					t.Errorf("batch tore: saw k2=%d after k1=%d in one batch", v2, v1)
+					break
+				}
+			}
+			close(stop)
+			wg.Wait()
+		})
+	}
+}
+
 // makeBatches prebuilds query batches so RNG cost stays outside the timed
 // loop. Zipf batches contain many duplicate hot keys — the coalescing case.
 func makeBatches(keys []string, zipf bool, size, count int) [][]string {

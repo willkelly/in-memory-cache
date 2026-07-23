@@ -28,7 +28,7 @@ func (c *Actor) GetBatch(keys []string) []BatchResult {
 	if len(keys) == 0 {
 		return out
 	}
-	idxs, starts := groupByShard(keys)
+	idxs, starts := groupByShard(keys, lowBitsShard)
 	touched := 0
 	for s := 0; s < shardCount; s++ {
 		if starts[s+1] > starts[s] {
