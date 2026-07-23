@@ -23,7 +23,7 @@ the cost of *synchronization*.
 | `cow`     | [cow.go](cow.go)           | Copy-on-write via `atomic.Pointer` | Lock-free reads; O(n) writes. |
 | `hamt`    | [hamt.go](hamt.go)         | Persistent HAMT, CAS-published root | Lock-free reads *and* writes; O(log n) path-copy per write. See below. |
 | `hamt256` | [hamtsharded.go](hamtsharded.go) | 256 independent persistent tries, 32-way | `hamt`'s design × `sharded`'s partitioning: still lock-free, writes scale. Gives up the global snapshot. |
-| `ctrie`   | [ctrie.go](ctrie.go)       | Ctrie: CAS cell above *every* node | Sharding folded into the structure: per-branch contention, O(1)-node writes. No-snapshot variant of Prokopec's Ctrie. See below. |
+| `ctrie`   | [ctrie.go](ctrie.go)       | Full Ctrie: CAS cell above *every* node | Sharding folded into the structure: per-branch contention, O(1)-node writes, and O(1) lock-free global snapshots (generations + GCAS). See below. |
 | `syncXmap`| [syncxmap.go](syncxmap.go) | `xsync.Map` (third-party) | CLHT-based; obstruction-free reads. |
 | `otter`   | [otter.go](otter.go)       | `otter` cache (third-party) | Full caching library (eviction, etc.), included for scale. |
 
@@ -198,46 +198,75 @@ copy disappears*: `hamt` copies root-to-leaf because the root pointer is
 its only mutation point, but here the mutation point sits directly above
 the change, so ancestors are untouched and a write allocates O(1) nodes.
 (That also kills the need for a bulk-load fast path: n Sets are O(n)
-total work.) Two simplifications versus the published Ctrie are
-documented in the file: no generation stamps (so no O(1) global snapshot,
-and `Len` is an O(n) walk with `sharded`-style moving-count semantics)
-and no contraction — deleted structure lingers as husks, which is exactly
-what makes a failed CAS safe to retry *locally*: an I-node, once linked,
-is never unlinked, so nothing can detach the subtree under a competitor.
+total work.)
 
-The full-sweep numbers ([results/linux/](results/linux/), same machine,
-`-keys=1000000`, 8 cores, 5 repetitions — this table is the canonical
-recent dataset; earlier per-section tables were quick passes):
+This is the FULL Ctrie: generation-stamped I-nodes, GCAS, and RDCSS root
+swaps give it the crown jewel — `Snapshot()`, an O(1) lock-free freeze of
+the entire map. A snapshot installs a fresh-generation copy of the root
+cell (sharing every node); a write commits only if its cell's generation
+still matches the root's, so every write lands wholly on one side of
+every snapshot; and writers lazily *renew* stale-generation cells on
+descent, so the snapshot's cost is paid by later writes one path at a
+time — cow's copy-on-write bargain, at path granularity. That restores
+exactly what sharding gave away: `Len` is an exact point-in-time count
+again, and `GetBatch` answers from one frozen world. One simplification
+remains from the earlier no-snapshot draft: no contraction (deleted
+structure lingers as husks; I-nodes are never unlinked, which is also
+what keeps retry/renewal reasoning tractable), and snapshots are
+read-only views rather than writable forks.
+
+A war story that earns its paragraph in a repo about *why* this stuff is
+hard: two successive adversarial reviews each found a real protocol bug
+in the first drafts of this file, both invisible to `-race` and to
+thousands of stress runs. First, a deep write whose generation check
+read the root *before* a snapshot's swap could commit *after* it — the
+swap's condition can only inspect the root cell — and a passive frozen
+reader could watch one frozen key change values (and the renewal path
+could lose the committed write entirely). Second, after fixing frozen
+reads, the same late commit legally lands *before* the snapshot — but a
+passive live read issued *after* `Snapshot()` returned could still serve
+the pre-write value: `Set < Snapshot < Get < Set`, which no linearization
+explains. The paper's answer to both is the same and turns out to be
+load-bearing, not an optimization: **every reader is a participant in
+the commit protocol.** Frozen readers arbitrate in-flight writes
+(deciding them aborted); live readers help decide them (committing
+current-generation writes, aborting doomed ones). Reads that merely
+observe are what tear snapshots.
+
+The numbers (same machine, `-keys=1000000`, 8 cores; sharded/hamt/
+hamt256 columns from the [results/linux/](results/linux/) sweep, ctrie
+re-measured after the snapshot machinery landed):
 
 | mix, uniform (8 cores) | sharded | hamt | hamt256 | ctrie | ctrie B/op |
 |---|--:|--:|--:|--:|--:|
-| read-only (r100) | **26** | 31 | 33 | 36 | 0 |
-| read-heavy (r90) | **27** | 172 | 63 | 49 | 34 |
-| balanced (r50) | **32** | 850 | 170 | 93 | 172 |
-| write-heavy (r10) | **35** | 1,524 | 268 | **132** | 310 |
+| read-only (r100) | **26** | 31 | 33 | 39 | 0 |
+| read-heavy (r90) | **27** | 172 | 63 | 54 | 36 |
+| balanced (r50) | **32** | 850 | 170 | 114 | 180 |
+| write-heavy (r10) | **35** | 1,524 | 268 | **160** | 324 |
 
 Read the garbage ladder across the three lock-free rungs at write-heavy:
 6,900 B (`hamt`: path copy × retry waste) → 841 B (`hamt256`: contention
-gone, tries thinner) → **310 B** (`ctrie`: one small C-node per write, no
-path). Each rung removed the term the previous experiment isolated. The
-read column shows what each I-node costs: every level is two dependent
-pointer loads instead of one, worth ~5 ns over `hamt` at this depth.
-And the scaling column is the payoff (write-heavy ns/op by cores):
+gone, tries thinner) → **324 B** (`ctrie`: one small C-node plus one GCAS
+state per write, no path). Each rung removed the term the previous
+experiment isolated. The whole generation/snapshot apparatus — deciding
+reads, GCAS states, the root indirection — costs 8–21% over the
+no-snapshot draft of this file (reads 36→39 ns, write-heavy 132→160),
+which is a remarkably small price for point-in-time everything. The
+scaling story survives intact (write-heavy ns/op by cores):
 
-| cores | 2 | 4 | 8 | 16 |
-|---|--:|--:|--:|--:|
-| hamt | 2,132 | 1,698 | 1,524 | 1,653 |
-| hamt256 | 864 | 456 | 268 | 186 |
-| ctrie | 522 | 269 | **132** | **80** |
-| sharded | 118 | 64 | 35 | 23 |
+| cores | 2 | 4 | 8 | 16 | 32 |
+|---|--:|--:|--:|--:|--:|
+| hamt | 2,132 | 1,698 | 1,524 | 1,653 | — |
+| hamt256 | 864 | 456 | 268 | 186 | — |
+| ctrie | 592 | 291 | **160** | **85** | **67** |
+| sharded | 118 | 64 | 35 | 23 | 14 |
 
 `hamt` is flat (serialized); `hamt256` and `ctrie` genuinely scale, and
-at 16 cores `ctrie` is within 3.6× of `sharded` — the residue being the
-price of persistence (310 B of immutable-node garbage per write) plus the
-I-node read tax, not contention. The full Ctrie's generation machinery
-would buy back the global O(1) snapshot on top of this; that protocol
-(GCAS/RDCSS) is a paper's worth of subtlety and is left as the noted
-next rung.
+at 16+ cores `ctrie` sits within ~4–5× of `sharded` — the residue being
+the price of persistence (the ~340 B of immutable-node garbage per
+write) plus the I-node read tax, not contention. And the batch table
+below closes the loop: a globally consistent `GetBatch` now costs the
+same as a plain Get loop.
 
 ### How much does each design rely on friendly key placement?
 
@@ -255,7 +284,12 @@ low-bits router (and pins the tries' first chunk), `mixshard*` targets
 | sharded | **11** | 77 | 39 | 13 | 12 | **7.1×** |
 | hamt | 1,314 | 1,280 | 1,385 | 1,375 | 1,390 | 1.06× |
 | hamt256 | 229 | 198 | 189 | 634 | 301 | **2.8×** |
-| ctrie | 72 | 78 | 82 | 76 | 74 | **1.13×** |
+| ctrie | 91 | 76 | 78 | 77 | 77 | **1.0×** |
+
+(`ctrie`'s row is the snapshot-capable version; its "worst" pattern is
+uniform itself — attacked clusters run *faster* because the touched
+subtree stays cache-warm. Placement cannot hurt a structure with no
+routing layer.)
 
 (Read-only tells the same story where it matters: `sharded` degrades
 7.0× under `lowshard1` — a lock convoy on *reads* — while every other
@@ -279,9 +313,9 @@ higher thread counts (write-heavy, ns/op):
 
 | threads | sharded attacked | ctrie attacked | sharded uniform |
 |---|--:|--:|--:|
-| 8 | 77 | 80 | 15 |
+| 8 | 77 | 76 | 15 |
 | 16 | 99 | **63** | 15 |
-| 32 | **226** | **58** | 11 |
+| 32 | **226** | **62** | 11 |
 
 The convoy on the hot shard's mutex worsens *superlinearly* as waiters
 stack up (5× over its own baseline at 8 threads, 20× at 32), while
@@ -436,7 +470,7 @@ design has a per-call cost to amortize — or a snapshot to share. Measured
 | cow | 92 | 88 | one map-pointer load — nothing to win |
 | hamt | 232 | 180 | one root load + per-Get overhead — modest win |
 | hamt256 | 210 | **313** | grouping costs MORE than 4,096 root loads — loses |
-| ctrie | 256 | 263 | nothing — parity, as predicted |
+| ctrie | 283 | 281 | one O(1) Snapshot — parity, consistency free |
 
 `hamt256`'s batch is deliberately kept as the honest negative result: it
 runs the same counting-sort grouping as `sharded`'s (with its own router
@@ -446,16 +480,19 @@ locks instead of 4,096, `hamt256` recoups only one 1-ns atomic load per
 key. The grouping is pure overhead unless you want what it actually
 buys: per-shard consistency.
 
-Which is the real story: for `cow` and `hamt`, `GetBatch` is not a
-performance feature at all but a *semantic* one — every answer comes from
-ONE atomic snapshot, a multi-key consistent read that no lock-striped
-design can offer at any price (`sharded`'s batch reads shard 3's keys,
-then, while writers keep writing, shard 7's). TestGetBatchSnapshot makes
-it concrete: a writer bumps k1 then k2 forever, so any true snapshot must
-see version(k1) ≥ version(k2); the snapshot batches never violate it,
-while a per-shard batch (or a plain Get loop) can. That is `hamt`'s niche
-stated one more way: the only fast structure here whose multi-key reads
-are transactions.
+Which is the real story: for `cow`, `hamt`, and `ctrie`, `GetBatch` is
+not a performance feature at all but a *semantic* one — every answer
+comes from ONE atomic snapshot, a multi-key consistent read that no
+lock-striped design can offer at any price (`sharded`'s batch reads
+shard 3's keys, then, while writers keep writing, shard 7's).
+TestGetBatchSnapshot makes it concrete: a writer bumps k1 then k2
+forever, so any true snapshot must see version(k1) ≥ version(k2); the
+snapshot batches never violate it, while a per-shard batch (or a plain
+Get loop) can. `ctrie`'s row is the striking one: its batch freezes the
+WHOLE map in O(1) first (the generation machinery — see its section), so
+the globally consistent batch costs the same per key as the plain loop.
+Transactional multi-reads for free, on a structure whose writes also
+scale.
 
 > **Measurement note: hold the working set constant.** The benchmark cycles
 > prebuilt batches, so its memory working set is (batch count) × (batch

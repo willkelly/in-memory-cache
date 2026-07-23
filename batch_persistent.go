@@ -18,11 +18,10 @@ package cache
 //   - hamt256: group positions by shard (its OWN router — Fibonacci
 //     mixing, not sharded's low bits), one root load per shard touched.
 //     Consistent per shard, like its Len.
-//   - ctrie: just the loop. With no lock to amortize and no snapshot to
-//     share, batching buys a ctrie nothing — mode=batch measures within
-//     noise of mode=loop, which is itself an honest data point: batch
-//     APIs earn their keep only where the design has a per-call cost to
-//     amortize or a snapshot to share.
+//   - ctrie: one O(1) Snapshot, then the loop against the frozen world.
+//     With the full generation protocol the ctrie joins the consistent-
+//     batch club — and pays on the write side instead: each snapshot
+//     obliges subsequent writes to renew the paths they touch.
 
 // GetBatch answers every key from a single frozen map snapshot.
 func (c *COW) GetBatch(keys []string) []BatchResult {
@@ -73,13 +72,8 @@ func (c *ShardedHAMT) GetBatch(keys []string) []BatchResult {
 	return out
 }
 
-// GetBatch is just the loop — see the file comment for why that is the
-// honest implementation for a ctrie.
+// GetBatch answers every key from one O(1) snapshot — a globally
+// consistent multi-key read, like cow's and hamt's.
 func (c *Ctrie) GetBatch(keys []string) []BatchResult {
-	out := make([]BatchResult, len(keys))
-	for i, k := range keys {
-		v, ok := ctrieGet(&c.root, fnv1a(k), k)
-		out[i] = BatchResult{Value: v, OK: ok}
-	}
-	return out
+	return c.Snapshot().GetBatch(keys)
 }

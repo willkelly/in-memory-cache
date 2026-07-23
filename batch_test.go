@@ -139,7 +139,7 @@ func TestGetBatchConcurrent(t *testing.T) {
 // read k1 early and k2 after later writes, observing the impossible
 // version(k2) > version(k1).
 func TestGetBatchSnapshot(t *testing.T) {
-	for _, name := range []string{"cow", "hamt"} {
+	for _, name := range []string{"cow", "hamt", "ctrie"} {
 		t.Run(name, func(t *testing.T) {
 			c, err := New(name)
 			if err != nil {

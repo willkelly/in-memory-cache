@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/bits"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -56,7 +57,7 @@ func checkCtrieInvariants(t *testing.T, cn *ctrieCNode, prefix uint64, shift uin
 			}
 			total++
 		case cn.nodeMap&bit != 0:
-			child := cn.inodes[ni].main.Load()
+			child := frozenRead(cn.inodes[ni])
 			ni++
 			total += checkCtrieInvariants(t, child, prefix|uint64(b)<<shift, shift+ctrieBits)
 		}
@@ -68,7 +69,7 @@ func checkCtrieInvariants(t *testing.T, cn *ctrieCNode, prefix uint64, shift uin
 // and that every stored hash is really fnv1a of its key.
 func checkCtrie(t *testing.T, c *Ctrie) {
 	t.Helper()
-	root := c.root.main.Load()
+	root := frozenRead(c.rdcssReadRoot().in)
 	if n, l := checkCtrieInvariants(t, root, 0, 0), c.Len(); n != l {
 		t.Fatalf("walker counts %d entries, Len says %d", n, l)
 	}
@@ -80,7 +81,7 @@ func checkCtrie(t *testing.T, c *Ctrie) {
 			}
 		}
 		for _, in := range cn.inodes {
-			walk(in.main.Load())
+			walk(frozenRead(in))
 		}
 	}
 	walk(root)
@@ -133,9 +134,9 @@ func TestCtrieDifferential(t *testing.T) {
 func TestCtrieCollisionPublicAPI(t *testing.T) {
 	h := fnv1a("a")
 	c := NewCtrie()
-	ctrieSet(&c.root, h, "decoy1", "d1")
-	ctrieSet(&c.root, h, "decoy2", "d2")
-	ctrieSet(&c.root, h, "a", "a-val")
+	ctrieSet(c, h, "decoy1", "d1")
+	ctrieSet(c, h, "decoy2", "d2")
+	ctrieSet(c, h, "a", "a-val")
 
 	if v, ok := c.Get("a"); !ok || v != "a-val" {
 		t.Fatalf("Get(a) = %q,%v; want a-val,true", v, ok)
@@ -167,33 +168,33 @@ func TestCtrieCollisionLifecycle(t *testing.T) {
 	const h = 0x7777777777777777
 	c := NewCtrie()
 	for _, k := range []string{"x", "y", "z"} {
-		ctrieSet(&c.root, h, k, k+"-val")
+		ctrieSet(c, h, k, k+"-val")
 	}
-	checkCtrieInvariants(t, c.root.main.Load(), 0, 0)
+	checkCtrieInvariants(t, frozenRead(c.rdcssReadRoot().in), 0, 0)
 	if c.Len() != 3 {
 		t.Fatalf("Len = %d, want 3", c.Len())
 	}
 	for _, k := range []string{"x", "y", "z"} {
-		if v, ok := ctrieGet(&c.root, h, k); !ok || v != k+"-val" {
+		if v, ok := ctrieGet(c, h, k); !ok || v != k+"-val" {
 			t.Fatalf("get %q = %q,%v", k, v, ok)
 		}
 	}
 	// Delete every entry: the collision node empties but stays linked.
 	for _, k := range []string{"x", "y", "z"} {
-		ctrieDelete(&c.root, h, k)
+		ctrieDelete(c, h, k)
 	}
 	if c.Len() != 0 {
 		t.Fatalf("Len after emptying = %d, want 0", c.Len())
 	}
-	if _, ok := ctrieGet(&c.root, h, "x"); ok {
+	if _, ok := ctrieGet(c, h, "x"); ok {
 		t.Fatal("get from emptied collision node hit")
 	}
 	// The husk must accept new entries.
-	ctrieSet(&c.root, h, "x", "again")
-	if v, ok := ctrieGet(&c.root, h, "x"); !ok || v != "again" {
+	ctrieSet(c, h, "x", "again")
+	if v, ok := ctrieGet(c, h, "x"); !ok || v != "again" {
 		t.Fatalf("reinsert into husk: %q,%v", v, ok)
 	}
-	checkCtrieInvariants(t, c.root.main.Load(), 0, 0)
+	checkCtrieInvariants(t, frozenRead(c.rdcssReadRoot().in), 0, 0)
 }
 
 // TestCtrieCollisionConcurrent focuses all contention on a single
@@ -214,7 +215,7 @@ func TestCtrieCollisionConcurrent(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < perG; i++ {
-				ctrieSet(&c.root, h, fmt.Sprintf("g%d-%d", g, i), "v")
+				ctrieSet(c, h, fmt.Sprintf("g%d-%d", g, i), "v")
 			}
 		}(g)
 	}
@@ -225,7 +226,7 @@ func TestCtrieCollisionConcurrent(t *testing.T) {
 	for g := 0; g < goroutines; g++ {
 		for i := 0; i < perG; i++ {
 			k := fmt.Sprintf("g%d-%d", g, i)
-			if _, ok := ctrieGet(&c.root, h, k); !ok {
+			if _, ok := ctrieGet(c, h, k); !ok {
 				t.Fatalf("key %q lost", k)
 			}
 		}
@@ -236,7 +237,7 @@ func TestCtrieCollisionConcurrent(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < perG; i++ {
-				ctrieDelete(&c.root, h, fmt.Sprintf("g%d-%d", g, i))
+				ctrieDelete(c, h, fmt.Sprintf("g%d-%d", g, i))
 			}
 		}(g)
 	}
@@ -244,6 +245,215 @@ func TestCtrieCollisionConcurrent(t *testing.T) {
 	if n := c.Len(); n != 0 {
 		t.Fatalf("after concurrent colliding deletes: Len = %d, want 0", n)
 	}
+}
+
+// TestCtrieSnapshot pins the snapshot contract single-threaded: O(1)
+// freeze, complete isolation from later writes (including deletes and
+// new keys), exact Len, and the live trie continuing correctly through
+// the lazy renewals the snapshot forces.
+func TestCtrieSnapshot(t *testing.T) {
+	const n = 1000
+	c := NewCtrie()
+	for i := 0; i < n; i++ {
+		c.Set(fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i))
+	}
+	snap := c.Snapshot()
+	if got := snap.Len(); got != n {
+		t.Fatalf("snapshot Len = %d, want %d", got, n)
+	}
+
+	// Hammer the live trie: overwrite half, delete half, add new keys.
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("k%d", i)
+		if i%2 == 0 {
+			c.Set(k, "changed")
+		} else {
+			c.Delete(k)
+		}
+	}
+	for i := 0; i < 500; i++ {
+		c.Set(fmt.Sprintf("new%d", i), "x")
+	}
+
+	// The snapshot is completely unmoved.
+	if got := snap.Len(); got != n {
+		t.Fatalf("snapshot Len after live churn = %d, want %d", got, n)
+	}
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("k%d", i)
+		if v, ok := snap.Get(k); !ok || v != fmt.Sprintf("v%d", i) {
+			t.Fatalf("snapshot Get(%q) = %q,%v; want v%d,true", k, v, ok, i)
+		}
+	}
+	if _, ok := snap.Get("new0"); ok {
+		t.Fatal("snapshot sees a key created after the freeze")
+	}
+
+	// The live trie is right, through all the renewals.
+	if got, want := c.Len(), n/2+500; got != want {
+		t.Fatalf("live Len = %d, want %d", got, want)
+	}
+	if v, ok := c.Get("k0"); !ok || v != "changed" {
+		t.Fatalf("live Get(k0) = %q,%v", v, ok)
+	}
+	if _, ok := c.Get("k1"); ok {
+		t.Fatal("live Get(k1) survived delete")
+	}
+	checkCtrie(t, c)
+
+	// A second snapshot sees the new world; the first still the old.
+	snap2 := c.Snapshot()
+	if v, ok := snap2.Get("new0"); !ok || v != "x" {
+		t.Fatalf("snap2 Get(new0) = %q,%v", v, ok)
+	}
+	if v, ok := snap.Get("k0"); !ok || v != "v0" {
+		t.Fatalf("snap1 disturbed by snap2: k0 = %q,%v", v, ok)
+	}
+}
+
+// TestCtrieSnapshotConcurrent takes snapshots in the middle of write
+// traffic and checks the two properties that define them: each snapshot
+// is internally frozen (re-reads agree), and successive snapshots move
+// forward in time (per-key versions never regress across snapshots,
+// since each key has a single ordered writer). The snapshot loop runs
+// until the writers FINISH, so overlap is guaranteed rather than raced
+// for, and the final assertions (the loop's last[] must have reached
+// every writer's final version through the monotonic checks) make the
+// assertions provably non-vacuous — a review found an earlier version
+// often completed its fixed-count loop before any writer published.
+func TestCtrieSnapshotConcurrent(t *testing.T) {
+	const writers = 4
+	const versions = 3_000
+
+	c := NewCtrie()
+	keys := make([]string, writers)
+	for w := range keys {
+		keys[w] = fmt.Sprintf("key-%d", w)
+		c.Set(keys[w], "0")
+	}
+
+	var writerWG sync.WaitGroup
+	var churnWG sync.WaitGroup
+	churnDone := make(chan struct{})
+	churnWG.Add(1)
+	go func() {
+		defer churnWG.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-churnDone:
+				return
+			default:
+			}
+			k := fmt.Sprintf("churn-%d", i%64)
+			c.Set(k, "x")
+			c.Delete(k)
+		}
+	}()
+	for w := 0; w < writers; w++ {
+		writerWG.Add(1)
+		go func(w int) {
+			defer writerWG.Done()
+			for i := 1; i <= versions; i++ {
+				c.Set(keys[w], fmt.Sprintf("%d", i))
+			}
+		}(w)
+	}
+	writersDone := make(chan struct{})
+	go func() { writerWG.Wait(); close(writersDone) }()
+
+	last := make([]int, writers)
+	snapshots := 0
+	for done := false; !done; {
+		select {
+		case <-writersDone:
+			done = true // one final snapshot below observes the end state
+		default:
+		}
+		snap := c.Snapshot()
+		snapshots++
+		for w := range keys {
+			v1, ok1 := snap.Get(keys[w])
+			v2, ok2 := snap.Get(keys[w])
+			if !ok1 || !ok2 || v1 != v2 {
+				t.Fatalf("snapshot %d not frozen: %q,%v then %q,%v", snapshots, v1, ok1, v2, ok2)
+			}
+			ver, err := strconv.Atoi(v1)
+			if err != nil {
+				t.Fatalf("snapshot %d: bad value %q", snapshots, v1)
+			}
+			if ver < last[w] {
+				t.Fatalf("snapshot %d went backwards on %s: %d after %d", snapshots, keys[w], ver, last[w])
+			}
+			last[w] = ver
+		}
+		if l1, l2 := snap.Len(), snap.Len(); l1 != l2 {
+			t.Fatalf("snapshot %d Len not frozen: %d then %d", snapshots, l1, l2)
+		}
+	}
+
+	close(churnDone)
+	churnWG.Wait()
+
+	// Non-vacuity: the monotonic chain must have carried every key all the
+	// way to its final version.
+	for w := range keys {
+		if last[w] != versions {
+			t.Fatalf("snapshot chain ended at version %d for %s, want %d (%d snapshots)",
+				last[w], keys[w], versions, snapshots)
+		}
+	}
+	checkCtrie(t, c)
+}
+
+// TestCtrieSnapshotLiveOrder pins the cross-API ordering that the review
+// found broken twice: a snapshot taken at time T and a LIVE Get issued
+// after T must agree on where every write falls. With one writer bumping
+// integer versions, snapshot-version <= subsequent-live-version must
+// hold; the passive-live-read bug inverted it (the snapshot contained a
+// late-committing write that a later live Get had not yet observed),
+// tripping a checker like this one within milliseconds.
+func TestCtrieSnapshotLiveOrder(t *testing.T) {
+	c := NewCtrie()
+	// Prefill so the written keys sit behind level-1 I-nodes (the root
+	// I-node is guarded by the RDCSS condition itself; depth is where the
+	// bug lived).
+	for _, k := range makeKeys(128, 4) {
+		c.Set(k, "x")
+	}
+	const key = "hot"
+	c.Set(key, "0")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			c.Set(key, strconv.Itoa(i))
+		}
+	}()
+
+	for i := 0; i < 30_000; i++ {
+		snap := c.Snapshot()
+		sv, ok1 := snap.Get(key)
+		lv, ok2 := c.Get(key)
+		if !ok1 || !ok2 {
+			t.Fatal("hot key missing")
+		}
+		s, _ := strconv.Atoi(sv)
+		l, _ := strconv.Atoi(lv)
+		if s > l {
+			t.Fatalf("iteration %d: snapshot has version %d, later live read got %d", i, s, l)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	checkCtrie(t, c)
 }
 
 // TestCtrieConcurrentValues is the value-level linearizability test (same
